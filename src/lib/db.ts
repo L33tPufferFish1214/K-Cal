@@ -1,116 +1,92 @@
 import type { AppPreference, CachedFood, FoodDraft, FoodLog, UserProfile } from '../types';
 import { createId } from './id';
 
-const DB_NAME = 'kcal-family-tracker';
-const DB_VERSION = 1;
+const STORAGE_KEY = 'kcal-family-tracker-v1';
 
-type StoreName = 'profiles' | 'logs' | 'foodCache' | 'preferences';
-
-const storeKeyPaths: Record<StoreName, string> = {
-  profiles: 'id',
-  logs: 'id',
-  foodCache: 'id',
-  preferences: 'key'
-};
-
-function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      for (const [storeName, keyPath] of Object.entries(storeKeyPaths) as Array<[StoreName, string]>) {
-        if (!database.objectStoreNames.contains(storeName)) {
-          database.createObjectStore(storeName, { keyPath });
-        }
-      }
-    };
-
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-  });
+interface StoredState {
+  profiles: UserProfile[];
+  logs: FoodLog[];
+  foodCache: CachedFood[];
+  preferences: AppPreference[];
 }
 
-function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-  });
+function emptyState(): StoredState {
+  return {
+    profiles: [],
+    logs: [],
+    foodCache: [],
+    preferences: []
+  };
 }
 
-async function withStore<T>(
-  storeName: StoreName,
-  mode: IDBTransactionMode,
-  callback: (store: IDBObjectStore) => IDBRequest<T> | Promise<T>
-): Promise<T> {
-  const database = await openDatabase();
+function readState(): StoredState {
   try {
-    const transaction = database.transaction(storeName, mode);
-    const store = transaction.objectStore(storeName);
-    const result = await callback(store);
-    return result instanceof IDBRequest ? requestToPromise(result) : result;
-  } finally {
-    database.close();
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return emptyState();
+    }
+
+    return {
+      ...emptyState(),
+      ...JSON.parse(raw)
+    };
+  } catch {
+    return emptyState();
   }
 }
 
-async function getAll<T>(storeName: StoreName): Promise<T[]> {
-  return withStore(storeName, 'readonly', (store) => store.getAll() as IDBRequest<T[]>);
-}
-
-async function put<T>(storeName: StoreName, value: T): Promise<void> {
-  await withStore(storeName, 'readwrite', async (store) => {
-    await requestToPromise(store.put(value));
-  });
-}
-
-async function add<T>(storeName: StoreName, value: T): Promise<void> {
-  await withStore(storeName, 'readwrite', async (store) => {
-    await requestToPromise(store.add(value));
-  });
-}
-
-async function remove(storeName: StoreName, key: string): Promise<void> {
-  await withStore(storeName, 'readwrite', async (store) => {
-    await requestToPromise(store.delete(key));
-  });
+function writeState(state: StoredState): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
 export async function getProfiles(): Promise<UserProfile[]> {
-  const profiles = await getAll<UserProfile>('profiles');
-  return profiles.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return readState().profiles.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
 export async function saveProfile(profile: UserProfile): Promise<void> {
-  await put('profiles', { ...profile, updatedAt: new Date().toISOString() });
+  const state = readState();
+  const updated = { ...profile, updatedAt: new Date().toISOString() };
+  const index = state.profiles.findIndex((item) => item.id === profile.id);
+
+  if (index >= 0) {
+    state.profiles[index] = updated;
+  } else {
+    state.profiles.push(updated);
+  }
+
+  writeState(state);
 }
 
 export async function getLogsForUser(userId: string): Promise<FoodLog[]> {
-  const logs = await getAll<FoodLog>('logs');
-  return logs.filter((log) => log.userId === userId).sort((left, right) => right.loggedAt.localeCompare(left.loggedAt));
+  return readState()
+    .logs.filter((log) => log.userId === userId)
+    .sort((left, right) => right.loggedAt.localeCompare(left.loggedAt));
 }
 
 export async function addFoodLog(log: FoodLog): Promise<void> {
-  await add('logs', log);
+  const state = readState();
+  state.logs.push(log);
+  writeState(state);
   await rememberFood(log);
 }
 
 export async function deleteFoodLog(id: string): Promise<void> {
-  await remove('logs', id);
+  const state = readState();
+  state.logs = state.logs.filter((log) => log.id !== id);
+  writeState(state);
 }
 
 export async function getRecentFoods(userId: string, limit = 30): Promise<CachedFood[]> {
-  const foods = await getAll<CachedFood>('foodCache');
-  return foods
-    .filter((food) => food.userId === userId)
+  return readState()
+    .foodCache.filter((food) => food.userId === userId)
     .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt))
     .slice(0, limit);
 }
 
 export async function rememberFood(draft: FoodDraft & { userId: string; loggedAt?: string; createdAt?: string }): Promise<void> {
+  const state = readState();
   const normalizedName = draft.name.trim().toLowerCase();
-  const foods = await getAll<CachedFood>('foodCache');
-  const existing = foods.find((food) => food.userId === draft.userId && food.normalizedName === normalizedName);
+  const existing = state.foodCache.find((food) => food.userId === draft.userId && food.normalizedName === normalizedName);
   const now = new Date().toISOString();
 
   const cached: CachedFood = {
@@ -130,15 +106,30 @@ export async function rememberFood(draft: FoodDraft & { userId: string; loggedAt
     timesLogged: (existing?.timesLogged ?? 0) + 1
   };
 
-  await put('foodCache', cached);
+  if (existing) {
+    state.foodCache = state.foodCache.map((food) => (food.id === existing.id ? cached : food));
+  } else {
+    state.foodCache.push(cached);
+  }
+
+  writeState(state);
 }
 
 export async function setPreference(key: string, value: string): Promise<void> {
-  await put<AppPreference>('preferences', { key, value });
+  const state = readState();
+  const preference = { key, value };
+  const index = state.preferences.findIndex((item) => item.key === key);
+
+  if (index >= 0) {
+    state.preferences[index] = preference;
+  } else {
+    state.preferences.push(preference);
+  }
+
+  writeState(state);
 }
 
 export async function getPreference(key: string): Promise<string | undefined> {
-  const preferences = await getAll<AppPreference>('preferences');
-  return preferences.find((preference) => preference.key === key)?.value;
+  return readState().preferences.find((preference) => preference.key === key)?.value;
 }
 
