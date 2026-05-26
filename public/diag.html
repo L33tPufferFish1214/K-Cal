@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kcal Diagnostic</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Kcal diagnostic page</h1>
+    <p>If this page opens, GitHub Pages static hosting is working.</p>
+    <button id="button" type="button">Click test</button>
+    <pre id="output">Waiting...</pre>
+    <script>
+      document.getElementById('button').addEventListener('click', () => {
+        document.getElementById('output').textContent = `Clicked at ${new Date().toISOString()}`;
+      });
+      document.getElementById('output').textContent = 'JavaScript loaded.';
+    </script>
+  </body>
+</html>
+
